@@ -5,7 +5,7 @@ import { Settings, Send, Mic, MusicNote } from '@mui/icons-material'
 import Waveform from './components/Waveform'
 import theme from './theme'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 
 const MOOD_EMOJIS = [
   { emoji: '😄', label: 'Happy' },
@@ -80,9 +80,18 @@ export default function App() {
     }
   }
 
-  // Parse callback code from URL and exchange for user
+  // Parse user from query after backend redirect, or handle code (legacy)
   useEffect(() => {
     const url = new URL(window.location.href)
+    const uid = url.searchParams.get('user_id')
+    const display = url.searchParams.get('display_name')
+    if (uid) {
+      setUser({ user_id: Number(uid), display_name: display || '' })
+      url.searchParams.delete('user_id')
+      url.searchParams.delete('display_name')
+      window.history.replaceState({}, '', url.toString())
+      return
+    }
     const code = url.searchParams.get('code')
     if (code) {
       ;(async () => {
@@ -90,10 +99,9 @@ export default function App() {
         if (res.ok) {
           const u = await res.json()
           setUser(u)
-          // Clear the code from URL
-          url.searchParams.delete('code')
-          window.history.replaceState({}, '', url.toString())
         }
+        url.searchParams.delete('code')
+        window.history.replaceState({}, '', url.toString())
       })()
     }
   }, [])
@@ -240,15 +248,17 @@ export default function App() {
                       variant="contained"
                       disableElevation
                       onClick={() => setSelectedEmoji(isSelected ? '' : emoji)}
-                      className="group relative flex flex-col items-center justify-center gap-10 overflow-hidden text-white"
+                      className="group relative flex flex-col items-center justify-center gap-2 overflow-hidden text-white"
                       sx={{
-                        minHeight: { xs: 140, sm: 165 },
+                        // Half the previous size
+                        minHeight: { xs: 60, sm: 72 },
                         flexDirection: 'column',
-                        gap: 3,
+                        gap: 1,
                         borderRadius: '32px',
-                        padding: { xs: '32px 28px', sm: '40px 34px' },
+                        padding: { xs: '12px 10px', sm: '14px 12px' },
                         alignSelf: 'stretch',
-                        aspectRatio: '4 / 3',
+                        // Remove aspect ratio so height stays compact
+                        aspectRatio: 'auto',
                         textTransform: 'none',
                         background: isSelected
                           ? 'linear-gradient(160deg, rgba(13, 36, 58, 0.96), rgba(15, 58, 84, 0.96))'
@@ -280,7 +290,16 @@ export default function App() {
                           isSelected ? 'opacity-100' : 'opacity-60 group-hover:opacity-80'
                         }`}
                       />
-                      <Typography className="relative z-10 text-8xl drop-shadow-[0_6px_18px_rgba(0,0,0,0.55)]">
+                      <Typography
+                        component="div"
+                        className="relative z-10 drop-shadow-[0_6px_18px_rgba(0,0,0,0.55)]"
+                        sx={{
+                          // Half of previous emoji size
+                          fontSize: { xs: '1.5rem', sm: '2.0625rem', md: '2.625rem' },
+                          lineHeight: 1,
+                          textAlign: 'center',
+                        }}
+                      >
                         {emoji}
                       </Typography>
                       <Typography className="relative z-10 text-2xl font-semibold tracking-wide">

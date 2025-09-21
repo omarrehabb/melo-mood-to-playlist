@@ -4,10 +4,10 @@ Quickstart for a minimal full‑stack app:
 
 Backend (FastAPI)
 - Files: backend/main.py, backend/requirements.txt
-- Env vars (create .env in backend/):
+- Env vars (create backend/.env — see backend/.env.example):
   - SPOTIFY_CLIENT_ID=your_client_id
   - SPOTIFY_CLIENT_SECRET=your_client_secret
-  - SPOTIFY_REDIRECT_URI=http://localhost:8000/api/auth/callback
+  - SPOTIFY_REDIRECT_URI=http://127.0.0.1:8000/api/auth/callback
   - POSTGRES_URL=postgresql+psycopg2://user:pass@localhost:5432/melo (defaults to sqlite file if not set)
   - FRONTEND_ORIGIN=http://localhost:5173
 
@@ -36,4 +36,4 @@ Notes
 - Uses simple keyword/emoji rules to map mood to Spotify recommendation parameters (genre, tempo, energy, valence, instrumentalness).
 - Uses Client Credentials for recommendations; Authorization Code + refresh tokens for saving playlists.
 - DB defaults to SQLite for easy start; switch POSTGRES_URL to PostgreSQL in prod.
-
+ - Spotify redirect URI must use HTTPS or an explicit loopback IP. Use `http://127.0.0.1:8000/api/auth/callback` (not `localhost`).

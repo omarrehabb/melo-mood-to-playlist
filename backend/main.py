@@ -1,20 +1,22 @@
-eimport os
+import os
 import time
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import httpx
 import orjson
 import requests
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import JSON, DateTime, ForeignKey, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 
-# Load environment variables from .env if present
-load_dotenv()
+# Load environment variables. Prefer backend/.env alongside this file.
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(ENV_PATH)
 
 # -----------------------------------------------------------------------------
 # Config
@@ -22,9 +24,10 @@ load_dotenv()
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
-SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/auth/callback")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8000/api/auth/callback")
+SPOTIFY_MARKET = os.getenv("SPOTIFY_MARKET", "US")
 POSTGRES_URL = os.getenv("POSTGRES_URL", "sqlite:///./melo.db")
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5173")
 
 
 # -----------------------------------------------------------------------------
@@ -136,6 +139,7 @@ class HistoryItem(BaseModel):
 # -----------------------------------------------------------------------------
 
 _app_token_cache = {"token": None, "expires_at": 0.0}
+_genre_seed_cache = {"seeds": set(), "expires_at": 0.0}
 
 
 def get_spotify_app_token() -> str:
@@ -158,6 +162,52 @@ def get_spotify_app_token() -> str:
     return _app_token_cache["token"]
 
 
+def get_available_genre_seeds() -> Set[str]:
+    now = time.time()
+    if _genre_seed_cache["seeds"] and now < _genre_seed_cache["expires_at"]:
+        return _genre_seed_cache["seeds"]
+    token = get_spotify_app_token()
+    resp = requests.get(
+        "https://api.spotify.com/v1/recommendations/available-genre-seeds",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        # Fallback to a conservative default set if the call fails
+        defaults = {
+            "pop","dance","house","edm","hip-hop","r-n-b","rock","metal","indie","indie-pop","acoustic","ambient","classical","piano","soul","chill","study","sleep","party","work-out","sad","happy"
+        }
+        _genre_seed_cache["seeds"] = defaults
+        _genre_seed_cache["expires_at"] = now + 3600
+        return defaults
+    data = resp.json()
+    seeds = set(data.get("genres", []) or [])
+    _genre_seed_cache["seeds"] = seeds
+    _genre_seed_cache["expires_at"] = now + 3600
+    return seeds
+
+
+def normalize_seed_genres(candidates: List[str]) -> List[str]:
+    seeds = get_available_genre_seeds()
+    normalized = []
+    for g in candidates:
+        if g in seeds:
+            normalized.append(g)
+            continue
+        # Friendly aliases → valid seeds
+        alias_map = {
+            "lo-fi": "chill",
+            "lofi": "chill",
+            "workout": "work-out",
+            "rnb": "r-n-b",
+        }
+        alt = alias_map.get(g)
+        if alt and alt in seeds:
+            normalized.append(alt)
+    # Ensure we always have at least one valid seed
+    return normalized or ["pop"]
+
+
 def mood_to_params(mood: str, emoji: Optional[str] = None) -> dict:
     text = (mood or "").strip().lower()
     e = (emoji or "").strip()
@@ -173,8 +223,8 @@ def mood_to_params(mood: str, emoji: Optional[str] = None) -> dict:
     rules = [
         ("focus", {"seed_genres": ["ambient", "chill"], "target_tempo": 80, "target_energy": 0.3, "target_valence": 0.4, "target_instrumentalness": 0.9}),
         ("study", {"seed_genres": ["classical", "piano"], "target_tempo": 70, "target_energy": 0.2, "target_valence": 0.5, "target_instrumentalness": 0.95}),
-        ("chill", {"seed_genres": ["chill", "lo-fi"], "target_tempo": 85, "target_energy": 0.4, "target_valence": 0.6}),
-        ("lofi", {"seed_genres": ["lo-fi"], "target_tempo": 75, "target_energy": 0.3}),
+        ("chill", {"seed_genres": ["chill", "ambient"], "target_tempo": 85, "target_energy": 0.4, "target_valence": 0.6}),
+        ("lofi", {"seed_genres": ["chill"], "target_tempo": 75, "target_energy": 0.3}),
         ("happy", {"seed_genres": ["dance", "pop"], "target_tempo": 125, "target_energy": 0.8, "target_valence": 0.9}),
         ("sad", {"seed_genres": ["acoustic", "indie"], "target_tempo": 90, "target_energy": 0.3, "target_valence": 0.2}),
         ("angry", {"seed_genres": ["metal", "rock"], "target_tempo": 150, "target_energy": 0.95, "target_valence": 0.2}),
@@ -198,6 +248,8 @@ def mood_to_params(mood: str, emoji: Optional[str] = None) -> dict:
             break
     if e in emoji_rules:
         params.update(emoji_rules[e])
+    # Normalize seeds to valid values
+    params["seed_genres"] = normalize_seed_genres(params.get("seed_genres", ["pop"]))
     return params
 
 
@@ -207,6 +259,7 @@ async def get_recommendations(params: dict) -> List[Track]:
     q_params = {
         "limit": 20,
         "seed_genres": seeds,
+        "market": SPOTIFY_MARKET,
     }
     for k in ("target_tempo", "target_energy", "target_valence", "target_instrumentalness"):
         if k in params:
@@ -218,7 +271,23 @@ async def get_recommendations(params: dict) -> List[Track]:
             headers={"Authorization": f"Bearer {token}"},
         )
     if r.status_code != 200:
-        raise HTTPException(status_code=502, detail="Spotify recommendations failed")
+        # Fallback: try search-based aggregation by seed keywords
+        tracks_fb = await search_tracks_fallback(params.get("seed_genres", ["pop"]), token)
+        if tracks_fb:
+            return tracks_fb
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"status": r.status_code, "text": r.text[:200]}
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Spotify recommendations failed",
+                "error": detail,
+                "request_url": str(r.request.url),
+                "request_params": q_params,
+            },
+        )
     data = r.json()
     items = []
     for t in data.get("tracks", []):
@@ -233,6 +302,45 @@ async def get_recommendations(params: dict) -> List[Track]:
             )
         )
     return items
+
+
+async def search_tracks_fallback(seed_genres: List[str], token: str, limit: int = 20) -> List[Track]:
+    results: List[Track] = []
+    seen = set()
+    async with httpx.AsyncClient(timeout=10) as client:
+        for seed in seed_genres or ["pop"]:
+            params = {
+                "q": seed,
+                "type": "track",
+                "limit": min(10, limit),
+                "market": SPOTIFY_MARKET,
+            }
+            resp = await client.get(
+                "https://api.spotify.com/v1/search",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            for t in (data.get("tracks", {}) or {}).get("items", []):
+                tid = t.get("id")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                results.append(
+                    Track(
+                        id=tid,
+                        name=t.get("name"),
+                        artists=[a.get("name") for a in t.get("artists", [])],
+                        preview_url=t.get("preview_url"),
+                        external_url=(t.get("external_urls", {}) or {}).get("spotify"),
+                        image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
+                    )
+                )
+                if len(results) >= limit:
+                    return results
+    return results
 
 
 # -----------------------------------------------------------------------------
@@ -404,12 +512,77 @@ def spotify_callback(code: str, db: Session = Depends(get_db)):
             user = User(spotify_user_id=spotify_user_id, display_name=display_name, refresh_token=refresh_token)
             db.add(user)
 
-    return {"user_id": user.id, "display_name": user.display_name}
+    # Redirect back to frontend with user info for dev UX
+    try:
+        dest = f"{FRONTEND_ORIGIN}/?user_id={user.id}&display_name={requests.utils.requote_uri(user.display_name or '')}"
+        return RedirectResponse(url=dest, status_code=302)
+    except Exception:
+        # Fallback to JSON
+        return {"user_id": user.id, "display_name": user.display_name}
 
 
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/spotify/genres")
+def available_genres():
+    seeds = sorted(list(get_available_genre_seeds()))
+    return {"genres": seeds}
+
+
+@app.get("/api/debug/config")
+def debug_config():
+    # Do NOT return secrets; just booleans and important settings
+    try:
+        seeds = list(get_available_genre_seeds())
+        seeds_count = len(seeds)
+    except Exception:
+        seeds_count = -1
+    sample_params = mood_to_params("focus")
+    return {
+        "has_client_id": bool(SPOTIFY_CLIENT_ID),
+        "has_client_secret": bool(SPOTIFY_CLIENT_SECRET),
+        "redirect_uri": SPOTIFY_REDIRECT_URI,
+        "market": SPOTIFY_MARKET,
+        "available_genres_count": seeds_count,
+        "sample_params_for_focus": sample_params,
+    }
+
+
+@app.get("/api/debug/spotify")
+def debug_spotify():
+    token = get_spotify_app_token()
+    # Check available seeds
+    seeds_status = None
+    try:
+        resp = requests.get(
+            "https://api.spotify.com/v1/recommendations/available-genre-seeds",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        seeds_status = {"status": resp.status_code, "ok": resp.status_code == 200, "len": len((resp.json() or {}).get("genres", [])) if resp.status_code == 200 else None}
+    except Exception as e:
+        seeds_status = {"status": "error", "error": str(e)}
+
+    # Check recommendations with known seed
+    try:
+        r = requests.get(
+            "https://api.spotify.com/v1/recommendations",
+            params={"limit": 1, "seed_genres": "pop", "market": SPOTIFY_MARKET},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        try:
+            body = r.json()
+        except Exception:
+            body = {"text": r.text[:200]}
+        rec_status = {"status": r.status_code, "ok": r.status_code == 200, "tracks": len(body.get("tracks", [])) if r.status_code == 200 else None, "body": body}
+    except Exception as e:
+        rec_status = {"status": "error", "error": str(e)}
+
+    return {"seeds": seeds_status, "recommendations": rec_status}
 
 
 # -----------------------------------------------------------------------------
