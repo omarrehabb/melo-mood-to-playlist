@@ -1,13 +1,24 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { ThemeProvider } from '@mui/material/styles'
+import { CssBaseline, Box, Container, Typography, TextField, Button, IconButton, Avatar, Divider, Grid, Card, CardContent } from '@mui/material'
+import { Settings, Send, Mic, MusicNote } from '@mui/icons-material'
 import Waveform from './components/Waveform'
+import theme from './theme'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
-const EMOJIS = ['😊', '😢', '😤', '❤️', '🧘', '🏋️']
+const MOOD_EMOJIS = [
+  { emoji: '😄', label: 'Happy' },
+  { emoji: '😢', label: 'Sad' },
+  { emoji: '⚡️', label: 'Energetic' },
+  { emoji: '😌', label: 'Relaxed' },
+  { emoji: '😠', label: 'Angry' },
+  { emoji: '🧘', label: 'Calm' },
+]
 
 export default function App() {
   const [mood, setMood] = useState('')
-  const [emoji, setEmoji] = useState('')
+  const [selectedEmoji, setSelectedEmoji] = useState('')
   const [loading, setLoading] = useState(false)
   const [playlist, setPlaylist] = useState(null)
   const [user, setUser] = useState(null)
@@ -46,7 +57,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/api/mood-to-playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mood, emoji, user_id: user?.id }),
+        body: JSON.stringify({ mood, emoji: selectedEmoji, user_id: user?.id }),
       })
       if (!res.ok) throw new Error('Failed to fetch playlist')
       const data = await res.json()
@@ -90,7 +101,7 @@ export default function App() {
   const savePlaylist = async () => {
     if (!user) return alert('Log in with Spotify first')
     if (!playlist) return
-    const name = prompt('Playlist name?', `Melo • ${mood || emoji || 'My Mood'}`)
+    const name = prompt('Playlist name?', `Melo • ${mood || selectedEmoji || 'My Mood'}`)
     if (!name) return
     try {
       const trackIds = (playlist.tracks || []).map((t) => t.id)
@@ -107,85 +118,319 @@ export default function App() {
     }
   }
 
+  const EqualizerBar = ({ delay = 0, opacity = 1 }) => (
+    <div
+      className={`h-2 w-1 bg-accent-green equalizer-bar`}
+      style={{
+        animationDelay: `${delay}s`,
+        opacity: opacity,
+      }}
+    />
+  )
+
   return (
-    <div className="melo-gradient min-h-screen">
-      <div className="max-w-3xl mx-auto px-6 py-10">
-        <header className="flex items-center justify-between mb-8">
-          <h1 className="text-3xl font-semibold">Melo</h1>
-          <div className="flex items-center gap-3">
-            {user ? (
-              <span className="text-sm text-gray-300">Signed in</span>
-            ) : (
-              <button onClick={loginSpotify} className="px-3 py-2 bg-green-600 hover:bg-green-500 rounded text-sm">Connect Spotify</button>
-            )}
-          </div>
-        </header>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <Box className="relative flex h-auto min-h-screen w-full flex-col overflow-x-hidden bg-background-light dark:bg-background-dark">
+        <Box className="layout-container flex h-full grow flex-col">
+          {/* Header */}
+          <Box className="flex items-center justify-between whitespace-nowrap border-b border-white/10 px-6 sm:px-10 py-4">
+            <Box className="flex items-center gap-3 text-white">
+              <svg className="size-6 text-accent-green" fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+                <path clipRule="evenodd" d="M24 0.757355L47.2426 24L24 47.2426L0.757355 24L24 0.757355ZM21 35.7574V12.2426L9.24264 24L21 35.7574Z" fill="currentColor" fillRule="evenodd"></path>
+              </svg>
+              <Typography variant="h2" className="text-xl font-bold">Melo</Typography>
+            </Box>
+            <Box className="flex items-center gap-4">
+              <IconButton className="group flex items-center justify-center rounded-full size-10 bg-white/10 dark:bg-accent-green/10 hover:bg-white/20 dark:hover:bg-accent-green/20 transition-colors">
+                <Settings className="text-white" />
+              </IconButton>
+              <Avatar 
+                className="size-10 rounded-full bg-cover bg-center" 
+                src={user?.images?.[0]?.url || "https://lh3.googleusercontent.com/aida-public/AB6AXuA4-Epl-YdKDFbKqtPAsdKWPTt9fsPQCQomkJV5oLnlz5AraVcBFfKaOBC2HvNT2oTF4gfdqKjbY8fvc1HE0IjCgu4frqisqxsS2wSiGI38BxP834rWLyaAL2JDuU5EaQlIHGZ45ZGlj2JFnGRb6SmEdL-s87HizcBsePINWahptNvEk4c0hetAN0Vvcmh3pfOmya77Ain5DbQ6s5pz7vhEjBec0i_evN_ekP4Ynhe2cmzoc1iBq38_hl3ntF_OdQN7Q6BJEf8BXx6z"}
+              />
+            </Box>
+          </Box>
 
-        <form onSubmit={fetchPlaylist} className="bg-white/5 border border-white/10 rounded-xl p-5 space-y-4">
-          <label className="block text-sm text-gray-300">How are you feeling?</label>
-          <input
-            value={mood}
-            onChange={(e) => setMood(e.target.value)}
-            placeholder="e.g., focus, chill, happy..."
-            className="w-full rounded bg-white/10 border border-white/10 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-cyan-400"
-          />
-          <div className="flex items-center gap-2">
-            {EMOJIS.map((e) => (
-              <button
-                key={e}
-                type="button"
-                onClick={() => setEmoji(e)}
-                className={`text-2xl px-2 py-1 rounded ${emoji === e ? 'bg-white/20' : 'hover:bg-white/10'}`}
-                aria-label={`Select ${e}`}
-              >{e}</button>
-            ))}
-            <button
-              type="button"
-              onClick={startListening}
-              className={`ml-auto px-3 py-2 rounded border border-white/10 ${listening ? 'bg-red-600' : 'bg-white/10 hover:bg-white/20'}`}
-            >{listening ? 'Listening...' : '🎙️ Record'}</button>
-          </div>
-          <div className="flex gap-2">
-            <button disabled={loading} className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded disabled:opacity-50">Generate Playlist</button>
-            {playlist && (
-              <button type="button" onClick={savePlaylist} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded">Save</button>
-            )}
-          </div>
-        </form>
+          {/* Main Content */}
+          <Box component="main" className="flex flex-1 flex-col items-center px-4 py-8 sm:px-6">
+            <Container maxWidth="sm" className="w-full space-y-8">
+              <Box className="text-center">
+                <Typography variant="h1" className="text-3xl sm:text-4xl font-bold tracking-tight text-white">
+                  How are you feeling?
+                </Typography>
+              </Box>
 
-        <div className="mt-10">
-          <Waveform active={loading} />
-        </div>
+              {/* Mood Input */}
+              <Box className="relative">
+                <TextField
+                  fullWidth
+                  value={mood}
+                  onChange={(e) => setMood(e.target.value)}
+                  placeholder="Describe your mood, e.g. 'upbeat and focused'"
+                  variant="outlined"
+                  className="w-full"
+                  sx={{
+                    '& .MuiOutlinedInput-root': {
+                      borderRadius: 3,
+                      borderColor: 'rgba(53, 158, 255, 0.3)',
+                      backgroundColor: 'rgba(245, 247, 248, 0.05)',
+                      color: 'white',
+                      paddingRight: '60px', // Make space for the button
+                      '& fieldset': {
+                        borderColor: 'rgba(53, 158, 255, 0.3)',
+                      },
+                      '&:hover fieldset': {
+                        borderColor: '#2EFFC7',
+                      },
+                      '&.Mui-focused fieldset': {
+                        borderColor: '#2EFFC7',
+                        boxShadow: '0 0 15px rgba(46,255,199,0.2)',
+                      },
+                    },
+                    '& .MuiInputBase-input': {
+                      color: 'white',
+                      paddingRight: '60px', // Ensure text doesn't overlap with button
+                      '&::placeholder': {
+                        color: 'rgba(255, 255, 255, 0.5)',
+                        opacity: 1,
+                      },
+                    },
+                  }}
+                />
+                <IconButton
+                  onClick={fetchPlaylist}
+                  disabled={loading}
+                  sx={{
+                    position: 'absolute',
+                    right: '8px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '50%',
+                    backgroundColor: 'rgba(53, 158, 255, 0.2)',
+                    '&:hover': {
+                      backgroundColor: 'rgba(53, 158, 255, 0.3)',
+                    },
+                    '&:disabled': {
+                      opacity: 0.5,
+                    },
+                  }}
+                >
+                  <Send sx={{ color: 'rgba(255, 255, 255, 0.7)', fontSize: '20px' }} />
+                </IconButton>
+              </Box>
 
-        {playlist && (
-          <section className="mt-8">
-            <h2 className="text-xl font-semibold mb-3">Your Playlist</h2>
-            <p className="text-sm text-gray-400 mb-4">Params: {JSON.stringify(playlist.params)}</p>
-            <ul className="grid md:grid-cols-2 gap-4">
-              {playlist.tracks.map((t) => (
-                <li key={t.id} className="p-4 rounded-lg bg-white/5 border border-white/10">
-                  <div className="flex items-center gap-4">
-                    {t.image_url && (
-                      <img src={t.image_url} alt="album art" className="w-16 h-16 object-cover rounded" />
-                    )}
-                    <div className="flex-1">
-                      <div className="font-medium">{t.name}</div>
-                      <div className="text-sm text-gray-400">{t.artists.join(', ')}</div>
-                      {t.preview_url ? (
-                        <audio controls src={t.preview_url} className="mt-2 w-full" />
-                      ) : (
-                        <div className="text-xs text-gray-500 mt-2">No preview available</div>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
+              {/* Divider */}
+              <Box className="flex items-center gap-4">
+                <Box className="h-px flex-1 bg-white/10"></Box>
+                <Typography className="text-sm font-medium text-white/60">OR</Typography>
+                <Box className="h-px flex-1 bg-white/10"></Box>
+              </Box>
+
+              {/* Emoji Buttons */}
+              <Box className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {MOOD_EMOJIS.map(({ emoji, label }) => {
+                  const isSelected = selectedEmoji === emoji
+                  return (
+                    <Button
+                      key={emoji}
+                      fullWidth
+                      variant="contained"
+                      disableElevation
+                      onClick={() => setSelectedEmoji(isSelected ? '' : emoji)}
+                      className="group relative flex flex-col items-center justify-center gap-10 overflow-hidden text-white"
+                      sx={{
+                        minHeight: { xs: 140, sm: 165 },
+                        flexDirection: 'column',
+                        gap: 3,
+                        borderRadius: '32px',
+                        padding: { xs: '32px 28px', sm: '40px 34px' },
+                        alignSelf: 'stretch',
+                        aspectRatio: '4 / 3',
+                        textTransform: 'none',
+                        background: isSelected
+                          ? 'linear-gradient(160deg, rgba(13, 36, 58, 0.96), rgba(15, 58, 84, 0.96))'
+                          : 'linear-gradient(155deg, rgba(8, 21, 36, 0.95), rgba(6, 16, 28, 0.95))',
+                        border: isSelected
+                          ? '1px solid rgba(46, 255, 199, 0.45)'
+                          : '1px solid rgba(255, 255, 255, 0.08)',
+                        boxShadow: isSelected
+                          ? '0 28px 60px -18px rgba(46, 255, 199, 0.45), 0 18px 38px -16px rgba(9, 27, 44, 0.85)'
+                          : '0 22px 48px -22px rgba(6, 12, 24, 0.9)',
+                        transform: isSelected ? 'translateY(-6px)' : 'translateY(0)',
+                        transition: 'all 0.35s ease',
+                        '&:hover': {
+                          background: 'linear-gradient(160deg, rgba(12, 31, 53, 0.98), rgba(9, 27, 44, 0.95))',
+                          boxShadow: isSelected
+                            ? '0 32px 66px -18px rgba(46, 255, 199, 0.55), 0 20px 40px -16px rgba(9, 27, 44, 0.85)'
+                            : '0 28px 60px -20px rgba(46, 255, 199, 0.35)',
+                          borderColor: 'rgba(46, 255, 199, 0.32)',
+                          transform: 'translateY(-6px)',
+                        },
+                        '& .MuiTypography-root': {
+                          color: '#ffffff',
+                        },
+                      }}
+                    >
+                      <span className="pointer-events-none absolute inset-0 z-0 rounded-[32px] bg-gradient-to-br from-white/10 via-transparent to-transparent opacity-0 transition-opacity duration-500 group-hover:opacity-40" />
+                      <span
+                        className={`pointer-events-none absolute inset-[6%] z-0 rounded-[28px] bg-[radial-gradient(circle_at_20%_20%,_rgba(46,255,199,0.22),_transparent_60%)] transition-opacity duration-500 ${
+                          isSelected ? 'opacity-100' : 'opacity-60 group-hover:opacity-80'
+                        }`}
+                      />
+                      <Typography className="relative z-10 text-8xl drop-shadow-[0_6px_18px_rgba(0,0,0,0.55)]">
+                        {emoji}
+                      </Typography>
+                      <Typography className="relative z-10 text-2xl font-semibold tracking-wide">
+                        {label}
+                      </Typography>
+                    </Button>
+                  )
+                })}
+              </Box>
+
+              {/* Action Buttons */}
+              <Box className="space-y-4 pt-4">
+                <Button
+                  fullWidth
+                  variant="contained"
+                  onClick={fetchPlaylist}
+                  disabled={loading}
+                  className="w-full rounded-xl bg-accent-green py-4 text-center font-bold text-background-dark transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
+                  sx={{
+                    backgroundColor: '#2EFFC7',
+                    color: '#0f1923',
+                    '&:hover': {
+                      backgroundColor: '#26e6b8',
+                    },
+                  }}
+                >
+                  Generate Playlist
+                </Button>
+
+                <Button
+                  fullWidth
+                  variant="outlined"
+                  onClick={startListening}
+                  disabled={listening}
+                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-primary/20 dark:bg-primary/30 py-3 text-center font-semibold text-white transition-colors hover:bg-primary/30 dark:hover:bg-primary/40"
+                  sx={{
+                    backgroundColor: 'rgba(53, 158, 255, 0.2)',
+                    borderColor: 'rgba(53, 158, 255, 0.3)',
+                    color: 'white',
+                    '&:hover': {
+                      backgroundColor: 'rgba(53, 158, 255, 0.3)',
+                    },
+                  }}
+                >
+                  <Mic />
+                  <span>{listening ? 'Listening...' : 'Record voice'}</span>
+                </Button>
+
+                <Button
+                  fullWidth
+                  variant="outlined"
+                  onClick={loginSpotify}
+                  className="group flex w-full items-center justify-center gap-2 rounded-xl border-2 border-green-500/50 bg-transparent py-3 text-center font-semibold text-green-400 transition-colors hover:bg-green-500/20 hover:text-green-300"
+                  sx={{
+                    borderColor: 'rgba(34, 197, 94, 0.5)',
+                    color: '#4ade80',
+                    '&:hover': {
+                      backgroundColor: 'rgba(34, 197, 94, 0.2)',
+                      color: '#22c55e',
+                    },
+                  }}
+                >
+                  <MusicNote />
+                  <span>Connect to Spotify</span>
+                </Button>
+              </Box>
+            </Container>
+          </Box>
+
+          {/* Footer with Equalizer */}
+          <Box component="footer" className="mt-auto px-4 pb-4">
+            <Box className="flex items-center justify-center h-16 w-full max-w-lg mx-auto">
+              <Box className="flex items-center justify-around w-full h-full">
+                <EqualizerBar delay={0.1} opacity={0.7} />
+                <EqualizerBar delay={0.2} opacity={1} />
+                <EqualizerBar delay={0.3} opacity={0.7} />
+                <EqualizerBar delay={0.4} opacity={1} />
+                <EqualizerBar delay={0.5} opacity={0.7} />
+                <EqualizerBar delay={0.6} opacity={1} />
+                <EqualizerBar delay={0.7} opacity={0.7} />
+                <EqualizerBar delay={0.8} opacity={1} />
+                <EqualizerBar delay={0.9} opacity={0.7} className="hidden sm:block" />
+                <EqualizerBar delay={1.0} opacity={1} className="hidden sm:block" />
+                <EqualizerBar delay={1.1} opacity={0.7} className="hidden sm:block" />
+                <EqualizerBar delay={1.2} opacity={1} className="hidden sm:block" />
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+
+        {/* Loading Waveform */}
+        {loading && (
+          <Box className="mt-10">
+            <Waveform active={loading} />
+          </Box>
         )}
 
-      </div>
-    </div>
+        {/* Playlist Results */}
+        {playlist && (
+          <Box className="mt-8 px-4">
+            <Container maxWidth="lg">
+              <Typography variant="h2" className="text-xl font-semibold mb-3 text-white">
+                Your Playlist
+              </Typography>
+              <Typography className="text-sm text-gray-400 mb-4">
+                Params: {JSON.stringify(playlist.params)}
+              </Typography>
+              <Grid container spacing={2}>
+                {playlist.tracks.map((t) => (
+                  <Grid item xs={12} md={6} key={t.id}>
+                    <Card className="p-4 rounded-lg bg-white/5 border border-white/10">
+                      <CardContent className="flex items-center gap-4 p-0">
+                        {t.image_url && (
+                          <img src={t.image_url} alt="album art" className="w-16 h-16 object-cover rounded" />
+                        )}
+                        <Box className="flex-1">
+                          <Typography className="font-medium text-white">{t.name}</Typography>
+                          <Typography className="text-sm text-gray-400">{t.artists.join(', ')}</Typography>
+                          {t.preview_url ? (
+                            <audio controls src={t.preview_url} className="mt-2 w-full" />
+                          ) : (
+                            <Typography className="text-xs text-gray-500 mt-2">No preview available</Typography>
+                          )}
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+              {playlist && (
+                <Box className="mt-4 text-center">
+                  <Button
+                    variant="contained"
+                    onClick={savePlaylist}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded"
+                    sx={{
+                      backgroundColor: '#059669',
+                      '&:hover': {
+                        backgroundColor: '#047857',
+                      },
+                    }}
+                  >
+                    Save Playlist
+                  </Button>
+                </Box>
+              )}
+            </Container>
+          </Box>
+        )}
+      </Box>
+    </ThemeProvider>
   )
 }
-

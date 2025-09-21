@@ -9,3 +9,16 @@ html, body, #root { height: 100%; }
               radial-gradient(800px 300px at 90% 10%, rgba(236,72,153,0.25), transparent 70%);
 }
 
+.equalizer-bar {
+  animation: pulse-equalizer 1.5s infinite ease-in-out;
+}
+
+@keyframes pulse-equalizer {
+  0%, 100% {
+    transform: scaleY(0.2);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
