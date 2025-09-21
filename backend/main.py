@@ -450,7 +450,7 @@ def save_playlist(req: SavePlaylistRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/api/auth/login")
-def spotify_login():
+def spotify_login(redirect: bool = False):
     scopes = [
         "playlist-modify-private",
         "playlist-modify-public",
@@ -467,7 +467,10 @@ def spotify_login():
     base = "https://accounts.spotify.com/authorize"
     from urllib.parse import urlencode
 
-    return {"auth_url": f"{base}?{urlencode(params)}"}
+    auth_url = f"{base}?{urlencode(params)}"
+    if redirect:
+        return RedirectResponse(url=auth_url, status_code=302)
+    return {"auth_url": auth_url}
 
 
 class OAuthCallback(BaseModel):

@@ -70,15 +70,21 @@ export default function App() {
     }
   }
 
-  const loginSpotify = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/login`)
-      const data = await res.json()
-      window.location.href = data.auth_url
-    } catch (e) {
-      alert('Failed to start Spotify login')
-    }
+  const loginSpotify = () => {
+    // Simpler and more reliable: have the backend redirect directly
+    window.location.assign(`${API_BASE}/api/auth/login?redirect=1`)
   }
+
+  // Load user from localStorage on first mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('melo_user')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (parsed && parsed.user_id) setUser(parsed)
+      }
+    } catch {}
+  }, [])
 
   // Parse user from query after backend redirect, or handle code (legacy)
   useEffect(() => {
@@ -86,7 +92,9 @@ export default function App() {
     const uid = url.searchParams.get('user_id')
     const display = url.searchParams.get('display_name')
     if (uid) {
-      setUser({ user_id: Number(uid), display_name: display || '' })
+      const u = { user_id: Number(uid), display_name: display || '' }
+      setUser(u)
+      try { localStorage.setItem('melo_user', JSON.stringify(u)) } catch {}
       url.searchParams.delete('user_id')
       url.searchParams.delete('display_name')
       window.history.replaceState({}, '', url.toString())
@@ -99,6 +107,7 @@ export default function App() {
         if (res.ok) {
           const u = await res.json()
           setUser(u)
+          try { localStorage.setItem('melo_user', JSON.stringify(u)) } catch {}
         }
         url.searchParams.delete('code')
         window.history.replaceState({}, '', url.toString())
@@ -361,9 +370,10 @@ export default function App() {
                       color: '#22c55e',
                     },
                   }}
+                  disabled={!!user}
                 >
                   <MusicNote />
-                  <span>Connect to Spotify</span>
+                  <span>{user ? `Connected as ${user.display_name || 'User'}` : 'Connect to Spotify'}</span>
                 </Button>
               </Box>
             </Container>
