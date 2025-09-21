@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+
+.melo-gradient {
+  background: radial-gradient(800px 300px at 10% 10%, rgba(59,130,246,0.25), transparent 70%),
+              radial-gradient(800px 300px at 90% 10%, rgba(236,72,153,0.25), transparent 70%);
+}
+
