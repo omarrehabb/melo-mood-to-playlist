@@ -104,6 +104,8 @@ class MoodRequest(BaseModel):
     mood: str
     emoji: Optional[str] = None
     user_id: Optional[int] = None
+    exclude_ids: Optional[List[str]] = None
+    exclude_keys: Optional[List[str]] = None
 
 
 class Track(BaseModel):
@@ -113,6 +115,7 @@ class Track(BaseModel):
     preview_url: Optional[str] = None
     external_url: Optional[str] = None
     image_url: Optional[str] = None
+    duration_ms: Optional[int] = None
 
 
 class PlaylistResponse(BaseModel):
@@ -253,66 +256,161 @@ def mood_to_params(mood: str, emoji: Optional[str] = None) -> dict:
     return params
 
 
+def _normalize_title(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    s = str(raw).lower()
+    import re
+    # remove featuring/with credits
+    s = re.sub(r"\s*(\(|-|–|—)?\s*(feat\.|featuring|with)\s+[^)\-–—]+\)?", " ", s, flags=re.IGNORECASE)
+    # remove bracketed descriptors with version keywords
+    s = re.sub(r"\s*[\(\[\{][^\)\]\}]*\b(live|acoustic|remaster(?:ed)?(?:\s*\d{4})?|demo|session|radio\s*edit|edit|version|mono|stereo|deluxe|extended|re[-\s]?recorded|remix)\b[^\)\]\}]*[\)\]\}]\s*", " ", s, flags=re.IGNORECASE)
+    # remove trailing descriptors after dashes/pipes
+    s = re.sub(r"\s*[-–—|•]\s*\b(live|acoustic|remaster(?:ed)?(?:\s*\d{4})?|demo|session|radio\s*edit|edit|version|mono|stereo|deluxe|extended|re[-\s]?recorded|remix)\b.*$", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"[^a-z0-9\s']", " ", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
+
+
+def _base_track_key(t: Track) -> str:
+    title = _normalize_title(t.name)
+    primary_artist = t.artists[0] if t.artists else ""
+    artist = str(primary_artist).lower().strip()
+    if not title:
+        return ""
+    return f"{artist}—{title}"
+
+
 async def get_recommendations(params: dict) -> List[Track]:
+    """Build a larger, more diverse pool using multiple batched recommendation calls.
+
+    - Increases per-call limit to 50 (Spotify max is 100) to fetch more at once
+    - Performs a few batches with slight jitter on targets to diversify results
+    - Dedupe by track ID across batches
+    """
     token = get_spotify_app_token()
-    seeds = ",".join(params.get("seed_genres", ["pop"])[:5])
-    q_params = {
-        "limit": 20,
-        "seed_genres": seeds,
-        "market": SPOTIFY_MARKET,
-    }
-    for k in ("target_tempo", "target_energy", "target_valence", "target_instrumentalness"):
-        if k in params:
-            q_params[k] = params[k]
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(
-            "https://api.spotify.com/v1/recommendations",
-            params=q_params,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-    if r.status_code != 200:
-        # Fallback: try search-based aggregation by seed keywords
-        tracks_fb = await search_tracks_fallback(params.get("seed_genres", ["pop"]), token)
-        if tracks_fb:
-            return tracks_fb
+
+    import random
+    seeds_list = params.get("seed_genres", ["pop"])[:5]
+
+    # Tune these to balance pool size vs. rate limits
+    limit = 100  # per request; Spotify allows up to 100
+    batches = 4  # number of diversified recommendation pulls
+
+    def jitter(val: Optional[float], amt: float = 0.15, tempo_abs: float = 8.0) -> Optional[float]:
+        if val is None:
+            return None
         try:
-            detail = r.json()
+            import random
+            v = float(val)
+            # If looks like tempo (BPM), nudge by absolute amount, clamp to sensible range
+            if v > 5:
+                j = v + (random.random() * 2 - 1) * tempo_abs
+                j = max(40.0, min(220.0, j))
+                return round(j, 1)
+            # Otherwise treat as ratio in [0,1]
+            j = max(0.0, min(1.0, v + (random.random() * 2 - 1) * amt))
+            return round(j, 3)
         except Exception:
-            detail = {"status": r.status_code, "text": r.text[:200]}
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "Spotify recommendations failed",
-                "error": detail,
-                "request_url": str(r.request.url),
-                "request_params": q_params,
-            },
-        )
-    data = r.json()
-    items = []
-    for t in data.get("tracks", []):
-        items.append(
-            Track(
-                id=t["id"],
-                name=t["name"],
-                artists=[a["name"] for a in t.get("artists", [])],
+            return val
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        all_items: List[Track] = []
+        seen_ids: Set[str] = set()
+        last_error = None
+        import random as _rand
+        for i in range(batches):
+            # Randomize seed selection per batch for variety
+            batch_seeds = seeds_list[:]
+            random.shuffle(batch_seeds)
+            max_take = max(1, min(5, len(batch_seeds)))
+            take = random.randint(1, max_take)
+            seeds = ",".join(batch_seeds[:take])
+            q_params = {
+                "limit": limit,
+                "seed_genres": seeds,
+                "market": SPOTIFY_MARKET,
+            }
+            # Apply small jitter to diversify between calls
+            for k in ("target_tempo", "target_energy", "target_valence", "target_instrumentalness"):
+                if k in params:
+                    q_params[k] = jitter(params[k], 0.12, 10.0) or params[k]
+
+            # Randomize popularity window to diversify (0-100)
+            q_params["min_popularity"] = max(0, min(100, int(_rand.uniform(5, 70))))
+            # Optionally cap max_popularity above min to bias towards mid-long tail sometimes
+            q_params["max_popularity"] = max(q_params["min_popularity"] + 10, int(_rand.uniform(60, 100)))
+
+            r = await client.get(
+                "https://api.spotify.com/v1/recommendations",
+                params=q_params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code != 200:
+                last_error = r
+                continue
+            data = r.json()
+            for t in data.get("tracks", []):
+                tid = t.get("id")
+                if not tid or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                all_items.append(
+                    Track(
+                        id=tid,
+                        name=t.get("name"),
+                        artists=[a.get("name") for a in t.get("artists", [])],
                 preview_url=t.get("preview_url"),
                 external_url=(t.get("external_urls", {}) or {}).get("spotify"),
                 image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
+                duration_ms=t.get("duration_ms"),
             )
         )
-    return items
+
+    if not all_items:
+        # Fallback: try search-based aggregation by seed keywords with larger limit
+        tracks_fb = await search_tracks_fallback(seeds_list, token, limit=limit * batches)
+        if tracks_fb:
+            return tracks_fb
+        # Bubble up last error with context
+        if last_error is not None:
+            try:
+                detail = last_error.json()
+            except Exception:
+                detail = {"status": last_error.status_code, "text": last_error.text[:200]}
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Spotify recommendations failed",
+                    "error": detail,
+                },
+            )
+    return all_items
 
 
-async def search_tracks_fallback(seed_genres: List[str], token: str, limit: int = 20) -> List[Track]:
+async def search_tracks_fallback(
+    seed_genres: List[str],
+    token: str,
+    limit: int = 20,
+    exclude_ids: Optional[Set[str]] = None,
+    exclude_keys: Optional[Set[str]] = None,
+) -> List[Track]:
+    import random
     results: List[Track] = []
-    seen = set()
+    seen: Set[str] = set()
+    exclude_ids = exclude_ids or set()
+    exclude_keys = exclude_keys or set()
     async with httpx.AsyncClient(timeout=10) as client:
         for seed in seed_genres or ["pop"]:
+            # Randomize year window and offset to avoid same results
+            start_year = random.randint(1990, 2018)
+            end_year = start_year + random.randint(2, 10)
+            q = f"{seed} year:{start_year}-{end_year}"
             params = {
-                "q": seed,
+                "q": q,
                 "type": "track",
-                "limit": min(10, limit),
+                "limit": min(25, limit),
+                "offset": random.randint(0, 800),
                 "market": SPOTIFY_MARKET,
             }
             resp = await client.get(
@@ -325,19 +423,23 @@ async def search_tracks_fallback(seed_genres: List[str], token: str, limit: int 
             data = resp.json()
             for t in (data.get("tracks", {}) or {}).get("items", []):
                 tid = t.get("id")
-                if not tid or tid in seen:
+                if not tid or tid in seen or tid in exclude_ids:
+                    continue
+                # Build Track and compute base key for exclude check
+                tr = Track(
+                    id=tid,
+                    name=t.get("name"),
+                    artists=[a.get("name") for a in t.get("artists", [])],
+                    preview_url=t.get("preview_url"),
+                    external_url=(t.get("external_urls", {}) or {}).get("spotify"),
+                    image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
+                    duration_ms=t.get("duration_ms"),
+                )
+                key = _base_track_key(tr)
+                if key and key in exclude_keys:
                     continue
                 seen.add(tid)
-                results.append(
-                    Track(
-                        id=tid,
-                        name=t.get("name"),
-                        artists=[a.get("name") for a in t.get("artists", [])],
-                        preview_url=t.get("preview_url"),
-                        external_url=(t.get("external_urls", {}) or {}).get("spotify"),
-                        image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
-                    )
-                )
+                results.append(tr)
                 if len(results) >= limit:
                     return results
     return results
@@ -354,6 +456,56 @@ async def mood_to_playlist(body: MoodRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Provide mood or emoji")
     params = mood_to_params(body.mood or "", body.emoji)
     tracks = await get_recommendations(params)
+
+    # Exclude previously seen tracks if client sends them
+    exclude_ids = set((body.exclude_ids or []))
+    exclude_keys = set((body.exclude_keys or []))
+    if exclude_ids or exclude_keys:
+        filtered = []
+        for t in tracks:
+            if t.id in exclude_ids:
+                continue
+            key = _base_track_key(t)
+            if key and key in exclude_keys:
+                continue
+            filtered.append(t)
+        tracks = filtered
+
+    # If filtering removed too many, attempt one more batch to refill.
+    # If still too few, allow ignoring excludes to guarantee results.
+    if len(tracks) < 20:
+        # First refill honoring excludes
+        refill = await get_recommendations(params)
+        if exclude_ids or exclude_keys:
+            tmp = []
+            for t in refill:
+                if t.id in exclude_ids:
+                    continue
+                key = _base_track_key(t)
+                if key and key in exclude_keys:
+                    continue
+                tmp.append(t)
+            refill = tmp
+        # merge while keeping unique by id
+        seen = {t.id for t in tracks}
+        for t in refill:
+            if t.id not in seen:
+                tracks.append(t)
+                seen.add(t.id)
+        # If still too few, do a final refill without excludes
+        if len(tracks) < 10:
+            # Use search fallback honoring excludes to broaden pool without repeats
+            fb = await search_tracks_fallback(
+                params.get("seed_genres", ["pop"]),
+                get_spotify_app_token(),
+                limit=30,
+                exclude_ids=exclude_ids,
+                exclude_keys=exclude_keys,
+            )
+            for t in fb:
+                if t.id not in seen:
+                    tracks.append(t)
+                    seen.add(t.id)
 
     # Optionally persist mood history if user_id provided
     if body.user_id:

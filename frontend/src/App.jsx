@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { ThemeProvider } from '@mui/material/styles'
-import { CssBaseline, Box, Container, Typography, TextField, Button, IconButton, Avatar, Divider, Grid, Card, CardContent } from '@mui/material'
-import { Settings, Send, Mic, MusicNote } from '@mui/icons-material'
-import Waveform from './components/Waveform'
-import theme from './theme'
+import { ThemeProvider, createTheme } from '@mui/material/styles'
+import { CssBaseline, Box, Container, Typography, TextField, Button, IconButton, Avatar, Divider, Grid, Tooltip } from '@mui/material'
+import { Settings, Send, DarkMode, LightMode } from '@mui/icons-material'
+import { SiSpotify } from 'react-icons/si'
+import LoadingOverlay from './components/LoadingOverlay'
+import SongCard from './components/SongCard'
+import theme, { makeTheme } from './theme'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 
@@ -24,6 +26,99 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [listening, setListening] = useState(false)
   const recognitionRef = useRef(null)
+  const [darkMode, setDarkMode] = useState(true)
+
+  // initialize theme mode from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('melo_theme')
+      if (saved === 'light') setDarkMode(false)
+    } catch {}
+  }, [])
+
+  // reflect mode to <html> class for Tailwind dark: styles
+  useEffect(() => {
+    const root = document.documentElement
+    if (darkMode) root.classList.add('dark')
+    else root.classList.remove('dark')
+    try { localStorage.setItem('melo_theme', darkMode ? 'dark' : 'light') } catch {}
+  }, [darkMode])
+
+  const muiTheme = useMemo(() => makeTheme(darkMode ? 'dark' : 'light'), [darkMode])
+
+  // Persistent per-mood dedupe to avoid repeats across runs (v2 schema)
+  const MOOD_SEEN_STORAGE_KEY = 'melo_seen_tracks_v2'
+  const moodKey = useMemo(() => {
+    const m = (mood || '').trim().toLowerCase()
+    const e = (selectedEmoji || '').trim()
+    return `${m}__${e}`
+  }, [mood, selectedEmoji])
+
+  const loadSeenForMood = (key) => {
+    try {
+      const raw = localStorage.getItem(MOOD_SEEN_STORAGE_KEY)
+      if (!raw) return { keys: new Set(), ids: new Set() }
+      const obj = JSON.parse(raw) || {}
+      const entry = obj[key]
+      if (Array.isArray(entry)) {
+        // backward-compat for v1 (keys only)
+        return { keys: new Set(entry), ids: new Set() }
+      }
+      return {
+        keys: new Set(Array.isArray(entry?.keys) ? entry.keys : []),
+        ids: new Set(Array.isArray(entry?.ids) ? entry.ids : []),
+      }
+    } catch {
+      return { keys: new Set(), ids: new Set() }
+    }
+  }
+
+  const saveSeenForMood = (key, seen) => {
+    try {
+      const raw = localStorage.getItem(MOOD_SEEN_STORAGE_KEY)
+      const obj = raw ? (JSON.parse(raw) || {}) : {}
+      const keysList = Array.from(seen.keys)
+      const idsList = Array.from(seen.ids)
+      obj[key] = { keys: keysList.slice(-800), ids: idsList.slice(-800) }
+      localStorage.setItem(MOOD_SEEN_STORAGE_KEY, JSON.stringify(obj))
+    } catch {}
+  }
+
+  // Helpers to normalize titles and dedupe similar versions (live, remaster, acoustic, edits, etc.)
+  const normalizeTitle = (raw) => {
+    if (!raw) return ''
+    let s = String(raw).toLowerCase()
+    // remove featuring/with credits from title
+    s = s.replace(/\s*(\(|-|–|—)?\s*(feat\.|featuring|with)\s+[^)\-–—]+\)?/gi, '')
+    // remove bracketed descriptors with common version keywords
+    s = s.replace(/\s*[\(\[\{][^\)\]\}]*\b(live|acoustic|remaster(?:ed)?(?:\s*\d{4})?|demo|session|radio\s*edit|edit|version|mono|stereo|deluxe|extended|re[-\s]?recorded|remix)\b[^\)\]\}]*[\)\]\}]\s*/gi, ' ')
+    // remove dash/pipe separated descriptors at end
+    s = s.replace(/\s*[-–—|•]\s*\b(live|acoustic|remaster(?:ed)?(?:\s*\d{4})?|demo|session|radio\s*edit|edit|version|mono|stereo|deluxe|extended|re[-\s]?recorded|remix)\b.*$/gi, ' ')
+    // collapse whitespace and trim punctuation
+    s = s.replace(/[^a-z0-9\s']/g, ' ').replace(/\s{2,}/g, ' ').trim()
+    return s
+  }
+
+  const baseTrackKey = (t) => {
+    const title = normalizeTitle(t?.name || '')
+    const primaryArtist = (Array.isArray(t?.artists) ? t.artists[0] : t?.artists) || ''
+    const artist = String(primaryArtist).toLowerCase().trim()
+    if (!title) return ''
+    return `${artist}—${title}`
+  }
+
+  // Deduplicate tracks for display by normalized title + primary artist
+  const filteredTracks = useMemo(() => {
+    const seen = new Set()
+    const list = []
+    for (const t of playlist?.tracks || []) {
+      const key = baseTrackKey(t)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      list.push(t)
+    }
+    return list
+  }, [playlist])
 
   useEffect(() => {
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -54,14 +149,80 @@ export default function App() {
     setLoading(true)
     setPlaylist(null)
     try {
+      // First call (records history if user present) and sends exclude sets
       const res = await fetch(`${API_BASE}/api/mood-to-playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mood, emoji: selectedEmoji, user_id: user?.id }),
+        body: JSON.stringify({
+          mood,
+          emoji: selectedEmoji,
+          user_id: user?.user_id || user?.id,
+          // Provide excludes so backend can avoid repeats across runs (limit to avoid over-filtering)
+          exclude_ids: Array.from(loadSeenForMood(moodKey).ids).slice(-300),
+          exclude_keys: Array.from(loadSeenForMood(moodKey).keys).slice(-300),
+        }),
       })
       if (!res.ok) throw new Error('Failed to fetch playlist')
       const data = await res.json()
-      setPlaylist(data)
+
+      // Backend now returns a larger diversified pool; no need for extra calls
+      const combinedTracks = [...(data.tracks || [])]
+
+      // From the returned tracks, build a larger randomized, de-duplicated set
+      // 1) de-dup similar versions by base key
+      const uniq = []
+      const seenBaseLocal = new Set()
+      for (const t of combinedTracks || []) {
+        const k = baseTrackKey(t)
+        if (!k || seenBaseLocal.has(k)) continue
+        seenBaseLocal.add(k)
+        uniq.push(t)
+      }
+      // 2) shuffle
+      for (let i = uniq.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[uniq[i], uniq[j]] = [uniq[j], uniq[i]]
+      }
+      // 3) prefer tracks not seen before for this mood
+      const seenForMood = loadSeenForMood(moodKey)
+      const fresh = uniq.filter((t) => !seenForMood.keys.has(baseTrackKey(t)) && !seenForMood.ids.has(t.id))
+      let finalTracks = fresh.length ? fresh : uniq
+
+      // If still empty (over-filtered or backend filtered too much), retry without excludes
+      if (finalTracks.length === 0) {
+        const res2 = await fetch(`${API_BASE}/api/mood-to-playlist`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mood, emoji: selectedEmoji, user_id: user?.user_id || user?.id }),
+        })
+        if (res2.ok) {
+          const data2 = await res2.json()
+          const uniq2 = []
+          const seen2 = new Set()
+          for (const t of data2.tracks || []) {
+            const k2 = baseTrackKey(t)
+            if (!k2 || seen2.has(k2)) continue
+            seen2.add(k2)
+            uniq2.push(t)
+          }
+          // shuffle
+          for (let i = uniq2.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1))
+            ;[uniq2[i], uniq2[j]] = [uniq2[j], uniq2[i]]
+          }
+          finalTracks = uniq2
+        }
+      }
+
+      // Update seen registry with what we are about to show
+      for (const t of finalTracks) {
+        const k = baseTrackKey(t)
+        if (k) seenForMood.keys.add(k)
+        if (t.id) seenForMood.ids.add(t.id)
+      }
+      saveSeenForMood(moodKey, seenForMood)
+
+      setPlaylist({ ...data, tracks: finalTracks })
     } catch (err) {
       console.error(err)
       alert('Could not generate playlist.')
@@ -121,7 +282,17 @@ export default function App() {
     const name = prompt('Playlist name?', `Melo • ${mood || selectedEmoji || 'My Mood'}`)
     if (!name) return
     try {
-      const trackIds = (playlist.tracks || []).map((t) => t.id)
+      // Ensure we don't save duplicate songs (by normalized base title + primary artist)
+      const uniqueByBase = []
+      const seenBase = new Set()
+      for (const t of playlist.tracks || []) {
+        const key = baseTrackKey(t)
+        if (!key || seenBase.has(key)) continue
+        seenBase.add(key)
+        uniqueByBase.push(t)
+      }
+      // Also guard against duplicate IDs just in case
+      const trackIds = Array.from(new Set(uniqueByBase.map((t) => t.id)))
       const res = await fetch(`${API_BASE}/api/save-playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -135,6 +306,14 @@ export default function App() {
     }
   }
 
+  // Derive Spotify avatar and fallback initials
+  const getInitials = (name) => {
+    if (!name || typeof name !== 'string') return 'U'
+    const parts = name.trim().split(/\s+/)
+    const letters = parts.slice(0, 2).map((p) => p[0]).join('')
+    return (letters || name[0] || 'U').toUpperCase()
+  }
+
   const EqualizerBar = ({ delay = 0, opacity = 1 }) => (
     <div
       className={`h-2 w-1 bg-accent-green equalizer-bar`}
@@ -145,27 +324,42 @@ export default function App() {
     />
   )
 
+
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={muiTheme}>
       <CssBaseline />
-      <Box className="relative flex h-auto min-h-screen w-full flex-col overflow-x-hidden bg-background-light dark:bg-background-dark">
+      <Box
+        className="relative flex h-auto min-h-screen w-full flex-col overflow-x-hidden"
+        sx={{ backgroundColor: 'background.default', color: 'text.primary' }}
+      >
         <Box className="layout-container flex h-full grow flex-col">
           {/* Header */}
-          <Box className="flex items-center justify-between whitespace-nowrap border-b border-white/10 px-6 sm:px-10 py-4">
-            <Box className="flex items-center gap-3 text-white">
-              <svg className="size-6 text-accent-green" fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+          <Box className="flex items-center justify-between whitespace-nowrap px-6 sm:px-10 py-4" sx={{ borderBottom: 1, borderColor: 'divider' }}>
+            <Box className="flex items-center gap-3">
+              <svg className="size-6" fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" style={{ color: muiTheme.palette.secondary.main }}>
                 <path clipRule="evenodd" d="M24 0.757355L47.2426 24L24 47.2426L0.757355 24L24 0.757355ZM21 35.7574V12.2426L9.24264 24L21 35.7574Z" fill="currentColor" fillRule="evenodd"></path>
               </svg>
-              <Typography variant="h2" className="text-xl font-bold">Melo</Typography>
+              <Typography variant="h2" className="text-xl font-bold" color="text.primary">Melo</Typography>
             </Box>
             <Box className="flex items-center gap-4">
-              <IconButton className="group flex items-center justify-center rounded-full size-10 bg-white/10 dark:bg-accent-green/10 hover:bg-white/20 dark:hover:bg-accent-green/20 transition-colors">
-                <Settings className="text-white" />
+              <IconButton className="group flex items-center justify-center rounded-full size-10 bg-accent-green/10 hover:bg-accent-green/20 transition-colors">
+                <Settings sx={{ color: 'text.primary' }} />
               </IconButton>
-              <Avatar 
-                className="size-10 rounded-full bg-cover bg-center" 
-                src={user?.images?.[0]?.url || "https://lh3.googleusercontent.com/aida-public/AB6AXuA4-Epl-YdKDFbKqtPAsdKWPTt9fsPQCQomkJV5oLnlz5AraVcBFfKaOBC2HvNT2oTF4gfdqKjbY8fvc1HE0IjCgu4frqisqxsS2wSiGI38BxP834rWLyaAL2JDuU5EaQlIHGZ45ZGlj2JFnGRb6SmEdL-s87HizcBsePINWahptNvEk4c0hetAN0Vvcmh3pfOmya77Ain5DbQ6s5pz7vhEjBec0i_evN_ekP4Ynhe2cmzoc1iBq38_hl3ntF_OdQN7Q6BJEf8BXx6z"}
-              />
+              <Tooltip title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+                <IconButton
+                  onClick={() => setDarkMode((v) => !v)}
+                  className="group flex items-center justify-center rounded-full size-10 bg-accent-green/10 hover:bg-accent-green/20 transition-colors"
+                >
+                  {darkMode ? <LightMode sx={{ color: 'text.primary' }} /> : <DarkMode sx={{ color: 'text.primary' }} />}
+                </IconButton>
+              </Tooltip>
+              <Avatar
+                className="size-10 rounded-full bg-cover bg-center"
+                src={user?.images?.[0]?.url || null}
+                alt={user?.display_name || 'User'}
+              >
+                {getInitials(user?.display_name || '')}
+              </Avatar>
             </Box>
           </Box>
 
@@ -173,7 +367,11 @@ export default function App() {
           <Box component="main" className="flex flex-1 flex-col items-center px-4 py-8 sm:px-6">
             <Container maxWidth="sm" className="w-full space-y-8">
               <Box className="text-center">
-                <Typography variant="h1" className="text-3xl sm:text-4xl font-bold tracking-tight text-white">
+                <Typography
+                  variant="h1"
+                  className="text-3xl sm:text-4xl font-bold"
+                  color="text.primary"
+                >
                   How are you feeling?
                 </Typography>
               </Box>
@@ -187,33 +385,27 @@ export default function App() {
                   placeholder="Describe your mood, e.g. 'upbeat and focused'"
                   variant="outlined"
                   className="w-full"
-                  sx={{
+                  sx={(theme) => ({
                     '& .MuiOutlinedInput-root': {
                       borderRadius: 3,
-                      borderColor: 'rgba(53, 158, 255, 0.3)',
-                      backgroundColor: 'rgba(245, 247, 248, 0.05)',
-                      color: 'white',
-                      paddingRight: '60px', // Make space for the button
-                      '& fieldset': {
-                        borderColor: 'rgba(53, 158, 255, 0.3)',
-                      },
-                      '&:hover fieldset': {
-                        borderColor: '#2EFFC7',
-                      },
+                      paddingRight: '60px',
+                      backgroundColor: theme.palette.mode === 'dark' ? 'rgba(245,247,248,0.05)' : 'rgba(0,0,0,0.03)',
+                      '& fieldset': { borderColor: theme.palette.divider },
+                      '&:hover fieldset': { borderColor: theme.palette.secondary.main },
                       '&.Mui-focused fieldset': {
-                        borderColor: '#2EFFC7',
-                        boxShadow: '0 0 15px rgba(46,255,199,0.2)',
+                        borderColor: theme.palette.secondary.main,
+                        boxShadow: theme.palette.mode === 'dark' ? '0 0 15px rgba(46,255,199,0.2)' : '0 0 0 rgba(0,0,0,0)'
                       },
                     },
                     '& .MuiInputBase-input': {
-                      color: 'white',
-                      paddingRight: '60px', // Ensure text doesn't overlap with button
+                      color: theme.palette.text.primary,
+                      paddingRight: '60px',
                       '&::placeholder': {
-                        color: 'rgba(255, 255, 255, 0.5)',
+                        color: theme.palette.text.secondary,
                         opacity: 1,
                       },
                     },
-                  }}
+                  })}
                 />
                 <IconButton
                   onClick={fetchPlaylist}
@@ -235,15 +427,15 @@ export default function App() {
                     },
                   }}
                 >
-                  <Send sx={{ color: 'rgba(255, 255, 255, 0.7)', fontSize: '20px' }} />
+                  <Send sx={{ color: (theme) => theme.palette.text.secondary, fontSize: '20px' }} />
                 </IconButton>
               </Box>
 
               {/* Divider */}
               <Box className="flex items-center gap-4">
-                <Box className="h-px flex-1 bg-white/10"></Box>
-                <Typography className="text-sm font-medium text-white/60">OR</Typography>
-                <Box className="h-px flex-1 bg-white/10"></Box>
+                <Box className="h-px flex-1" sx={{ backgroundColor: 'divider' }}></Box>
+                <Typography className="text-sm font-medium" color="text.secondary">OR</Typography>
+                <Box className="h-px flex-1" sx={{ backgroundColor: 'divider' }}></Box>
               </Box>
 
               {/* Emoji Buttons */}
@@ -256,7 +448,11 @@ export default function App() {
                       fullWidth
                       variant="contained"
                       disableElevation
-                      onClick={() => setSelectedEmoji(isSelected ? '' : emoji)}
+                      onClick={() => {
+                        const next = isSelected ? '' : emoji
+                        setSelectedEmoji(next)
+                        if (next) setMood(label)
+                      }}
                       className="group relative flex flex-col items-center justify-center gap-2 overflow-hidden text-white"
                       sx={{
                         // Half the previous size
@@ -326,35 +522,16 @@ export default function App() {
                   variant="contained"
                   onClick={fetchPlaylist}
                   disabled={loading}
-                  className="w-full rounded-xl bg-accent-green py-4 text-center font-bold text-background-dark transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
+                  className="w-full rounded-xl py-4 text-center font-bold transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
                   sx={{
-                    backgroundColor: '#2EFFC7',
-                    color: '#0f1923',
+                    backgroundColor: '#1DB954',
+                    color: '#ffffff',
                     '&:hover': {
-                      backgroundColor: '#26e6b8',
+                      backgroundColor: '#19a34d',
                     },
                   }}
                 >
                   Generate Playlist
-                </Button>
-
-                <Button
-                  fullWidth
-                  variant="outlined"
-                  onClick={startListening}
-                  disabled={listening}
-                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-primary/20 dark:bg-primary/30 py-3 text-center font-semibold text-white transition-colors hover:bg-primary/30 dark:hover:bg-primary/40"
-                  sx={{
-                    backgroundColor: 'rgba(53, 158, 255, 0.2)',
-                    borderColor: 'rgba(53, 158, 255, 0.3)',
-                    color: 'white',
-                    '&:hover': {
-                      backgroundColor: 'rgba(53, 158, 255, 0.3)',
-                    },
-                  }}
-                >
-                  <Mic />
-                  <span>{listening ? 'Listening...' : 'Record voice'}</span>
                 </Button>
 
                 <Button
@@ -372,90 +549,72 @@ export default function App() {
                   }}
                   disabled={!!user}
                 >
-                  <MusicNote />
+                  <SiSpotify size={20} color="#1DB954" />
                   <span>{user ? `Connected as ${user.display_name || 'User'}` : 'Connect to Spotify'}</span>
                 </Button>
               </Box>
             </Container>
           </Box>
 
-          {/* Footer with Equalizer */}
-          <Box component="footer" className="mt-auto px-4 pb-4">
-            <Box className="flex items-center justify-center h-16 w-full max-w-lg mx-auto">
-              <Box className="flex items-center justify-around w-full h-full">
-                <EqualizerBar delay={0.1} opacity={0.7} />
-                <EqualizerBar delay={0.2} opacity={1} />
-                <EqualizerBar delay={0.3} opacity={0.7} />
-                <EqualizerBar delay={0.4} opacity={1} />
-                <EqualizerBar delay={0.5} opacity={0.7} />
-                <EqualizerBar delay={0.6} opacity={1} />
-                <EqualizerBar delay={0.7} opacity={0.7} />
-                <EqualizerBar delay={0.8} opacity={1} />
-                <EqualizerBar delay={0.9} opacity={0.7} className="hidden sm:block" />
-                <EqualizerBar delay={1.0} opacity={1} className="hidden sm:block" />
-                <EqualizerBar delay={1.1} opacity={0.7} className="hidden sm:block" />
-                <EqualizerBar delay={1.2} opacity={1} className="hidden sm:block" />
+          {/* Footer with Equalizer (hidden during loading) */}
+          {!loading && (
+            <Box component="footer" className="mt-auto px-4 pb-4">
+              <Box className="flex items-center justify-center h-16 w-full max-w-lg mx-auto">
+                <Box className="flex items-center justify-around w-full h-full">
+                  <EqualizerBar delay={0.1} opacity={0.7} />
+                  <EqualizerBar delay={0.2} opacity={1} />
+                  <EqualizerBar delay={0.3} opacity={0.7} />
+                  <EqualizerBar delay={0.4} opacity={1} />
+                  <EqualizerBar delay={0.5} opacity={0.7} />
+                  <EqualizerBar delay={0.6} opacity={1} />
+                  <EqualizerBar delay={0.7} opacity={0.7} />
+                  <EqualizerBar delay={0.8} opacity={1} />
+                  <EqualizerBar delay={0.9} opacity={0.7} className="hidden sm:block" />
+                  <EqualizerBar delay={1.0} opacity={1} className="hidden sm:block" />
+                  <EqualizerBar delay={1.1} opacity={0.7} className="hidden sm:block" />
+                  <EqualizerBar delay={1.2} opacity={1} className="hidden sm:block" />
+                </Box>
               </Box>
             </Box>
-          </Box>
+          )}
         </Box>
 
-        {/* Loading Waveform */}
-        {loading && (
-          <Box className="mt-10">
-            <Waveform active={loading} />
-          </Box>
-        )}
+        {/* Loading Overlay */}
+        {loading && <LoadingOverlay text="Generating your playlist…" />}
 
         {/* Playlist Results */}
         {playlist && (
           <Box className="mt-8 px-4">
             <Container maxWidth="lg">
-              <Typography variant="h2" className="text-xl font-semibold mb-3 text-white">
+              <Typography variant="h2" className="text-xl font-semibold mb-8 text-white">
                 Your Playlist
               </Typography>
-              <Typography className="text-sm text-gray-400 mb-4">
-                Params: {JSON.stringify(playlist.params)}
-              </Typography>
-              <Grid container spacing={2}>
-                {playlist.tracks.map((t) => (
-                  <Grid item xs={12} md={6} key={t.id}>
-                    <Card className="p-4 rounded-lg bg-white/5 border border-white/10">
-                      <CardContent className="flex items-center gap-4 p-0">
-                        {t.image_url && (
-                          <img src={t.image_url} alt="album art" className="w-16 h-16 object-cover rounded" />
-                        )}
-                        <Box className="flex-1">
-                          <Typography className="font-medium text-white">{t.name}</Typography>
-                          <Typography className="text-sm text-gray-400">{t.artists.join(', ')}</Typography>
-                          {t.preview_url ? (
-                            <audio controls src={t.preview_url} className="mt-2 w-full" />
-                          ) : (
-                            <Typography className="text-xs text-gray-500 mt-2">No preview available</Typography>
-                          )}
-                        </Box>
-                      </CardContent>
-                    </Card>
+              {/* Removed params display */}
+              <Grid container spacing={3} alignItems="stretch">
+                {filteredTracks.map((t) => (
+                  <Grid item xs={12} sm={6} md={3} lg={3} key={t.id}>
+                    <SongCard track={t} />
                   </Grid>
                 ))}
               </Grid>
-              {playlist && (
-                <Box className="mt-4 text-center">
-                  <Button
-                    variant="contained"
-                    onClick={savePlaylist}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded"
-                    sx={{
-                      backgroundColor: '#059669',
-                      '&:hover': {
-                        backgroundColor: '#047857',
-                      },
-                    }}
-                  >
-                    Save Playlist
-                  </Button>
-                </Box>
-              )}
+              <Box className="mt-8">
+                <Button
+                  fullWidth
+                  size="large"
+                  variant="contained"
+                  onClick={savePlaylist}
+                  className="w-full rounded-xl py-4 text-lg font-bold transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
+                  sx={{
+                    backgroundColor: '#1DB954',
+                    color: '#ffffff',
+                    '&:hover': {
+                      backgroundColor: '#19a34d',
+                    },
+                  }}
+                >
+                  Save Playlist
+                </Button>
+              </Box>
             </Container>
           </Box>
         )}
