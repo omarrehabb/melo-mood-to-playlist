@@ -2,7 +2,7 @@ import React from 'react'
 import { Card, CardContent, Box, Typography } from '@mui/material'
 
 export default function SongCard({ track }) {
-  const { name, artists = [], image_url, preview_url, duration_ms } = track || {}
+  const { name, artists = [], image_url, duration_ms } = track || {}
 
   const formatDuration = (ms) => {
     if (!ms || isNaN(ms)) return ''
@@ -11,37 +11,69 @@ export default function SongCard({ track }) {
     const s = total % 60
     return `${m}:${s.toString().padStart(2, '0')}`
   }
+
   return (
-    <Card className="rounded-lg bg-white/5 border border-white/10" sx={{ height: 180 }}>
-      <CardContent className="flex gap-3 p-3 h-full items-start">
-        <Box className="w-12 shrink-0">
-          {image_url ? (
-            <img
-              src={image_url}
-              alt="album art"
-              className="w-12 h-12 object-cover rounded"
-            />
-          ) : (
-            <Box className="w-12 h-12 rounded bg-white/10" />
-          )}
-        </Box>
-        <Box className="flex-1 flex flex-col min-w-0 h-full">
-          <Typography className="font-medium text-white" sx={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-            {name}
-          </Typography>
-          <Box className="flex items-center justify-between gap-2">
-            <Typography className="text-sm text-gray-400" sx={{ display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-              {artists.join(', ')}
-            </Typography>
-            <Typography className="text-xs text-gray-400 shrink-0">
-              {formatDuration(duration_ms)}
-            </Typography>
-          </Box>
-          <Box className="mt-auto w-full" sx={{ height: 32 }}>
-            {preview_url ? (
-              <audio controls src={preview_url} className="w-full h-full" />
-            ) : null}
-          </Box>
+    <Card
+      className="rounded-lg border border-white/10"
+      sx={{
+        height: 300,
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: 'rgba(255,255,255,0.04)',
+        overflow: 'hidden',
+        width: '100%',
+        minWidth: 190,
+        maxWidth: 200,
+        mx: 'auto',
+      }}
+    >
+      {/* Fixed-size cover on top to normalize card height */}
+      <Box sx={{ position: 'relative', width: '100%', height: 140, overflow: 'hidden' }}>
+        {image_url ? (
+          <img
+            src={image_url}
+            alt="album art"
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }}
+          />
+        ) : (
+          <Box sx={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(255,255,255,0.08)' }} />
+        )}
+      </Box>
+      {/* Details */}
+      <CardContent sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 0.5, flex: 1, overflow: 'hidden' }}>
+        <Typography
+          sx={{
+            color: 'text.primary',
+            display: '-webkit-box',
+            WebkitLineClamp: 3,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
+            fontWeight: 600,
+            fontSize: 15,
+            lineHeight: 1.3,
+          }}
+        >
+          {name}
+        </Typography>
+        <Typography
+          sx={{
+            color: 'text.secondary',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
+            fontSize: 13,
+            lineHeight: 1.3,
+          }}
+        >
+          {artists.join(', ')}
+        </Typography>
+        <Box sx={{ mt: 'auto', display: 'flex', justifyContent: 'flex-end' }}>
+          <Typography sx={{ color: 'text.secondary', fontSize: 12 }}>{formatDuration(duration_ms)}</Typography>
         </Box>
       </CardContent>
     </Card>

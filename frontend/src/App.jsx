@@ -314,12 +314,13 @@ export default function App() {
     return (letters || name[0] || 'U').toUpperCase()
   }
 
-  const EqualizerBar = ({ delay = 0, opacity = 1 }) => (
+  const EqualizerBar = ({ delay = 0, opacity = 1, className = '', style = {} }) => (
     <div
-      className={`h-2 w-1 bg-accent-green equalizer-bar`}
+      className={`h-2 w-1 bg-accent-green equalizer-bar ${className}`}
       style={{
         animationDelay: `${delay}s`,
         opacity: opacity,
+        ...style,
       }}
     />
   )
@@ -589,6 +590,7 @@ export default function App() {
               <Typography variant="h2" className="text-xl font-semibold mb-8 text-white">
                 Your Playlist
               </Typography>
+              <Divider sx={{ mb: 3, borderColor: 'divider' }} />
               {/* Removed params display */}
               <Grid container spacing={3} alignItems="stretch">
                 {filteredTracks.map((t) => (
@@ -597,23 +599,41 @@ export default function App() {
                   </Grid>
                 ))}
               </Grid>
-              <Box className="mt-8">
-                <Button
-                  fullWidth
-                  size="large"
-                  variant="contained"
-                  onClick={savePlaylist}
-                  className="w-full rounded-xl py-4 text-lg font-bold transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
-                  sx={{
-                    backgroundColor: '#1DB954',
-                    color: '#ffffff',
-                    '&:hover': {
-                      backgroundColor: '#19a34d',
-                    },
-                  }}
-                >
-                  Save Playlist
-                </Button>
+              <Box className="mt-8" sx={{ maxWidth: 720, mx: 'auto' }}>
+                <Grid container spacing={2} justifyContent="center" alignItems="stretch">
+                  <Grid item xs={12} md={6}>
+                    <Button
+                      fullWidth
+                      size="large"
+                      variant="contained"
+                      onClick={() => fetchPlaylist()}
+                      className="w-full rounded-xl py-4 text-lg font-bold transition-transform hover:scale-105 shadow-[0_0_25px_rgba(53,158,255,0.35)]"
+                      sx={{
+                        backgroundColor: '#359EFF',
+                        color: '#ffffff',
+                        '&:hover': { backgroundColor: '#2c8be6' },
+                      }}
+                    >
+                      Regenerate Playlist
+                    </Button>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <Button
+                      fullWidth
+                      size="large"
+                      variant="contained"
+                      onClick={savePlaylist}
+                      className="w-full rounded-xl py-4 text-lg font-bold transition-transform hover:scale-105 shadow-[0_0_25px_rgba(46,255,199,0.4)]"
+                      sx={{
+                        backgroundColor: '#1DB954',
+                        color: '#ffffff',
+                        '&:hover': { backgroundColor: '#19a34d' },
+                      }}
+                    >
+                      Save Playlist
+                    </Button>
+                  </Grid>
+                </Grid>
               </Box>
             </Container>
           </Box>

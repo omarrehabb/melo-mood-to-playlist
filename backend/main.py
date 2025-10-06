@@ -1,5 +1,7 @@
 import os
 import time
+import datetime
+import re
 from typing import List, Optional, Set
 
 import httpx
@@ -44,7 +46,7 @@ class User(Base):
     spotify_user_id: Mapped[str] = mapped_column(String(100), unique=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     refresh_token: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
-    created_at: Mapped[Optional[str]] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
     moods: Mapped[List["MoodHistory"]] = relationship(back_populates="user")
 
 
@@ -55,7 +57,7 @@ class MoodHistory(Base):
     mood_text: Mapped[str] = mapped_column(String(500))
     params: Mapped[dict] = mapped_column(JSON)
     tracks: Mapped[list] = mapped_column(JSON)
-    created_at: Mapped[Optional[str]] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user: Mapped[User] = relationship(back_populates="moods")
 
 
@@ -260,7 +262,6 @@ def _normalize_title(raw: Optional[str]) -> str:
     if not raw:
         return ""
     s = str(raw).lower()
-    import re
     # remove featuring/with credits
     s = re.sub(r"\s*(\(|-|–|—)?\s*(feat\.|featuring|with)\s+[^)\-–—]+\)?", " ", s, flags=re.IGNORECASE)
     # remove bracketed descriptors with version keywords
@@ -301,7 +302,6 @@ async def get_recommendations(params: dict) -> List[Track]:
         if val is None:
             return None
         try:
-            import random
             v = float(val)
             # If looks like tempo (BPM), nudge by absolute amount, clamp to sensible range
             if v > 5:
@@ -318,7 +318,6 @@ async def get_recommendations(params: dict) -> List[Track]:
         all_items: List[Track] = []
         seen_ids: Set[str] = set()
         last_error = None
-        import random as _rand
         for i in range(batches):
             # Randomize seed selection per batch for variety
             batch_seeds = seeds_list[:]
@@ -337,9 +336,9 @@ async def get_recommendations(params: dict) -> List[Track]:
                     q_params[k] = jitter(params[k], 0.12, 10.0) or params[k]
 
             # Randomize popularity window to diversify (0-100)
-            q_params["min_popularity"] = max(0, min(100, int(_rand.uniform(5, 70))))
+            q_params["min_popularity"] = max(0, min(100, int(random.uniform(5, 70))))
             # Optionally cap max_popularity above min to bias towards mid-long tail sometimes
-            q_params["max_popularity"] = max(q_params["min_popularity"] + 10, int(_rand.uniform(60, 100)))
+            q_params["max_popularity"] = max(q_params["min_popularity"] + 10, int(random.uniform(60, 100)))
 
             r = await client.get(
                 "https://api.spotify.com/v1/recommendations",
