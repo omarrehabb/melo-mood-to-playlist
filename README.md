@@ -44,8 +44,8 @@ uvicorn backend.main:app --reload --port 8000
 cd frontend
 npm install
 npm run dev
-```
 Open http://localhost:5173
+```
 
 Core endpoints
 - POST `/api/mood-to-playlist` → body `{ mood, emoji, user_id? }` → returns `{ params, tracks[] }`
