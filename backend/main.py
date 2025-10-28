@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import re
+import logging
 from typing import List, Optional, Set
 
 import httpx
@@ -12,6 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from .vibe_engine import generate_playlist_params
 from sqlalchemy import JSON, DateTime, ForeignKey, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -19,6 +22,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 # Load environment variables. Prefer backend/.env alongside this file.
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(ENV_PATH)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s - %(message)s')
 
 # -----------------------------------------------------------------------------
 # Config
@@ -123,6 +128,7 @@ class Track(BaseModel):
 class PlaylistResponse(BaseModel):
     params: dict
     tracks: List[Track]
+    meta: Optional[dict] = None
 
 
 class SavePlaylistRequest(BaseModel):
@@ -318,33 +324,111 @@ async def get_recommendations(params: dict) -> List[Track]:
         all_items: List[Track] = []
         seen_ids: Set[str] = set()
         last_error = None
+        simplified_once = False
+        minimal_once = False
         for i in range(batches):
             # Randomize seed selection per batch for variety
             batch_seeds = seeds_list[:]
             random.shuffle(batch_seeds)
-            max_take = max(1, min(5, len(batch_seeds)))
+            max_take = max(1, min(3, len(batch_seeds)))
             take = random.randint(1, max_take)
-            seeds = ",".join(batch_seeds[:take])
+            if len(batch_seeds) >= 2 and take == 1:
+                take = 2
+            selected_seeds = batch_seeds[:take]
+            if len(selected_seeds) == 1 and len(batch_seeds) > 1:
+                selected_seeds = batch_seeds[:2]
+            seeds = ",".join(selected_seeds)
             q_params = {
                 "limit": limit,
                 "seed_genres": seeds,
                 "market": SPOTIFY_MARKET,
             }
             # Apply small jitter to diversify between calls
-            for k in ("target_tempo", "target_energy", "target_valence", "target_instrumentalness"):
-                if k in params:
-                    q_params[k] = jitter(params[k], 0.12, 10.0) or params[k]
+            for key, value in params.items():
+                if not key.startswith("target_"):
+                    continue
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if key == "target_tempo":
+                    numeric_value = max(55.0, min(150.0, numeric_value))
+                    q_params[key] = jitter(numeric_value, 0.06, 6.0) or numeric_value
+                elif key == "target_energy":
+                    numeric_value = max(0.1, min(0.92, numeric_value))
+                    q_params[key] = jitter(numeric_value, 0.08, 6.0) or numeric_value
+                else:
+                    numeric_value = max(0.05, min(0.95, numeric_value))
+                    q_params[key] = jitter(numeric_value, 0.08, 6.0) or numeric_value
 
-            # Randomize popularity window to diversify (0-100)
-            q_params["min_popularity"] = max(0, min(100, int(random.uniform(5, 70))))
-            # Optionally cap max_popularity above min to bias towards mid-long tail sometimes
-            q_params["max_popularity"] = max(q_params["min_popularity"] + 10, int(random.uniform(60, 100)))
+            if i > 0:
+                optional_targets = [
+                    key
+                    for key in list(q_params.keys())
+                    if key.startswith("target_") and key not in {"target_energy", "target_valence", "target_tempo"}
+                ]
+                for key in optional_targets:
+                    q_params.pop(key, None)
+            if i > 1:
+                q_params.pop("target_tempo", None)
 
             r = await client.get(
                 "https://api.spotify.com/v1/recommendations",
                 params=q_params,
                 headers={"Authorization": f"Bearer {token}"},
             )
+            if r.status_code == 404:
+                if not simplified_once:
+                    simplified_once = True
+                    try:
+                        detail = r.json()
+                    except Exception:
+                        detail = {"text": r.text[:200]}
+                    logging.warning(
+                        "Spotify recommendations returned 404; retrying with relaxed targets",
+                        extra={"detail": detail, "params": {k: v for k, v in q_params.items() if k != "limit"}},
+                    )
+                    relaxed_params = {
+                        "limit": limit,
+                        "seed_genres": seeds,
+                        "market": SPOTIFY_MARKET,
+                    }
+                    energy = params.get("target_energy")
+                    if energy is not None:
+                        try:
+                            relaxed_params["target_energy"] = max(0.0, min(0.95, float(energy)))
+                        except Exception:
+                            pass
+                    tempo = params.get("target_tempo")
+                    if tempo is not None:
+                        try:
+                            relaxed_params["target_tempo"] = max(40.0, min(180.0, float(tempo)))
+                        except Exception:
+                            pass
+                    r = await client.get(
+                        "https://api.spotify.com/v1/recommendations",
+                        params=relaxed_params,
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+                if r.status_code == 404 and not minimal_once:
+                    minimal_once = True
+                    logging.warning(
+                        "Spotify recommendations still 404; retrying with minimal parameters",
+                        extra={"params": {"seed_genres": seeds}},
+                    )
+                    minimalist_seed_string = ",".join(seeds_list[: min(len(seeds_list), 3)]) or seeds
+                    minimalist_params = {
+                        "limit": limit,
+                        "seed_genres": minimalist_seed_string,
+                        "market": SPOTIFY_MARKET,
+                    }
+                    r = await client.get(
+                        "https://api.spotify.com/v1/recommendations",
+                        params=minimalist_params,
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
             if r.status_code != 200:
                 last_error = r
                 continue
@@ -359,12 +443,12 @@ async def get_recommendations(params: dict) -> List[Track]:
                         id=tid,
                         name=t.get("name"),
                         artists=[a.get("name") for a in t.get("artists", [])],
-                preview_url=t.get("preview_url"),
-                external_url=(t.get("external_urls", {}) or {}).get("spotify"),
-                image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
-                duration_ms=t.get("duration_ms"),
-            )
-        )
+                        preview_url=t.get("preview_url"),
+                        external_url=(t.get("external_urls", {}) or {}).get("spotify"),
+                        image_url=(t.get("album", {}).get("images", [{}]) or [{}])[0].get("url"),
+                        duration_ms=t.get("duration_ms"),
+                    )
+                )
 
     if not all_items:
         # Fallback: try search-based aggregation by seed keywords with larger limit
@@ -453,10 +537,36 @@ async def search_tracks_fallback(
 async def mood_to_playlist(body: MoodRequest, db: Session = Depends(get_db)):
     if not body.mood and not body.emoji:
         raise HTTPException(status_code=400, detail="Provide mood or emoji")
-    params = mood_to_params(body.mood or "", body.emoji)
+
+    logging.info("/api/mood-to-playlist received", extra={"mood": body.mood, "emoji": body.emoji, "user_id": body.user_id})
+
+    phrase = (body.mood or "").strip()
+    params, diagnostics = generate_playlist_params(phrase, body.emoji)
+    source = "template_engine"
+    if not params:
+        source = "legacy_rules"
+        params = mood_to_params(body.mood or "", body.emoji)
+        diagnostics = {**(diagnostics or {}), "source": source}
+    else:
+        diagnostics = {**(diagnostics or {}), "source": source}
+
+    seeds = normalize_seed_genres(params.get("seed_genres", ["pop"]))
+    params["seed_genres"] = seeds
     tracks = await get_recommendations(params)
 
-    # Exclude previously seen tracks if client sends them
+    logging.info(
+        "mood-to-playlist resolved",
+        extra={
+            "phrase": phrase,
+            "emoji": body.emoji,
+            "source": source,
+            "template_meta": diagnostics,
+            "seed_genres": seeds,
+            "targets": {k: v for k, v in params.items() if k.startswith("target_")},
+            "track_count": len(tracks),
+        },
+    )
+
     exclude_ids = set((body.exclude_ids or []))
     exclude_keys = set((body.exclude_keys or []))
     if exclude_ids or exclude_keys:
@@ -517,7 +627,7 @@ async def mood_to_playlist(body: MoodRequest, db: Session = Depends(get_db)):
         db.add(mh)
         db.commit()
 
-    return PlaylistResponse(params=params, tracks=tracks)
+    return PlaylistResponse(params=params, tracks=tracks, meta=diagnostics)
 
 
 @app.get("/api/moods/history", response_model=List[HistoryItem])
@@ -738,6 +848,9 @@ def debug_spotify():
 
     return {"seeds": seeds_status, "recommendations": rec_status}
 
+from .router_vibe import router as vibe_router
+
+app.include_router(vibe_router)
 
 # -----------------------------------------------------------------------------
 # Run with: uvicorn backend.main:app --reload --port 8000
